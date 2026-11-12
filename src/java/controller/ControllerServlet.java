@@ -1,0 +1,113 @@
+package controller;
+
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+
+import annotation.Json;
+import utils.MethodMap;
+import view.ModelAndView;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+public class ControllerServlet extends HttpServlet {
+    private Map<MethodMap, Method> methods = new HashMap<>();
+    private final Map<Class<?>, Object> controllers = new HashMap<>();
+    private String prefix;
+    private String suffix;
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void init() throws ServletException {
+        ServletContext context = getServletContext();
+        Object mapping = context.getAttribute("mapping");
+        methods = mapping instanceof Map
+                ? (Map<MethodMap, Method>) mapping
+                : new HashMap<>();
+        prefix = ServletUtil.prefix(context.getInitParameter("prefix"));
+        suffix = context.getInitParameter("suffix");
+        if (suffix == null) suffix = ".jsp";
+        String uploadPath = context.getInitParameter("upload-path");
+        if (uploadPath != null && !uploadPath.isBlank()) {
+            try {
+                Files.createDirectories(Path.of(uploadPath));
+            } catch (IOException exception) {
+                throw new ServletException("Impossible de créer le répertoire d'upload "
+                        + uploadPath, exception);
+            }
+        }
+    }
+
+    @Override
+    protected void doGet(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        process(request, response);
+    }
+
+    @Override
+    protected void doPost(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        process(request, response);
+    }
+
+    private void process(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        String url = request.getRequestURI()
+                .substring(request.getContextPath().length());
+        if (!url.startsWith("/")) url = "/" + url;
+        if (url.length() > 1 && url.endsWith("/")) {
+            url = url.substring(0, url.length() - 1);
+        }
+
+        String httpMethod = request.getMethod().toUpperCase();
+        Method method = methods.get(new MethodMap(url, httpMethod));
+        if (method == null) {
+            ServletUtil.routeNotFound(response, url, httpMethod, methods);
+            return;
+        }
+
+        if (!ServletUtil.isAuthorized(method, request)) {
+            ServletUtil.unauthorized(response);
+            return;
+        }
+
+        try {
+            Object controller = controller(method.getDeclaringClass());
+            Object[] arguments = ServletUtil.arguments(method, request, response);
+            Object result;
+            try {
+                result = method.invoke(controller, arguments);
+            } finally {
+                ServletUtil.saveSession(arguments);
+            }
+
+            if (method.isAnnotationPresent(Json.class)) {
+                ServletUtil.json(response, result);
+            } else if (result instanceof ModelAndView view) {
+                ServletUtil.view(getServletContext(), request, response, view,
+                        prefix, suffix);
+            } else {
+                ServletUtil.text(response, result);
+            }
+        } catch (Exception exception) {
+            throw new ServletException(exception);
+        }
+    }
+
+    private Object controller(Class<?> controllerClass) throws ReflectiveOperationException {
+        synchronized (controllers) {
+            Object instance = controllers.get(controllerClass);
+            if (instance == null) {
+                instance = controllerClass.getDeclaredConstructor().newInstance();
+                controllers.put(controllerClass, instance);
+            }
+            return instance;
+        }
+    }
+}
